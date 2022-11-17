@@ -10,6 +10,7 @@ try:
     # from awsglue.transforms import *
 except ImportError:
     raise ImportError("Please run script in a Glue job to import Glue libraries")
+    # pass
 
 try:
     from delta import DeltaTable
@@ -24,6 +25,7 @@ from pyspark.context import SparkContext
 from pyspark.sql import SparkSession, DataFrame
 
 GLUE_CUSTOM_PARAMS = [
+    "table_schema",
     "table_name",
     "raw_zone_path",
     "structured_zone_path",
@@ -31,13 +33,18 @@ GLUE_CUSTOM_PARAMS = [
     "full_load",
 ]
 
+# TODO: Modify to support sending alerts if a data source should not include deletes
+
 
 def validate_custom_params(args):
     """Validate custom parameters for Glue job"""
-    if not all([param in sys.argv for param in args]):
+    if not all(["--" + param in sys.argv for param in args]):
         raise ValueError(
-            "Missing required parameters. Please check your Glue job configuration."
+            "Missing required parameters. Please check your Glue job configuration.",
+            f"Expected parameters: {args}, got: {sys.argv}",
         )
+
+    return getResolvedOptions(sys.argv, ["JOB_NAME", *args])
 
 
 class LakeJob:
@@ -63,11 +70,17 @@ class LakeJob:
         self._args = getResolvedOptions(sys.argv, ["JOB_NAME", *GLUE_CUSTOM_PARAMS])
 
         # destructure args
+        self.table_schema = self._args["table_schema"]
         self.table_name = self._args["table_name"]
         self.rz_path = self._args["raw_zone_path"]
         self.sz_path = self._args["structured_zone_path"]
         self.merge_key = self._args["merge_key"]
         self.full_load = True if self._args["full_load"] is not None else False
+        self.op_col = "Op"
+        self.ops = {
+            "upsert": ["I", "U"],
+            "delete": ["D"],
+        }
 
         self._sc = SparkContext()
         self._glue_context = GlueContext(self._sc)
@@ -90,56 +103,77 @@ class LakeJob:
 
     def load_table(self, force=False, format="parquet"):
         """Load table from path"""
-        table_path = os.path.join(self.sz_path, self.table_name)
-        raw_path = os.path.join(self.rz_path, self.table_name)
+        table_path = os.path.join(self.sz_path, self.table_schema, self.table_name)
+        raw_path = os.path.join(
+            self.rz_path, self.table_schema, self.table_name, "LOAD*"
+        )
 
         if not DeltaTable.isDeltaTable(self.spark, table_path) or force:
             print("Table does not exist. Creating table...")
+            # _ = (
+            #     self._glue_context.create_dynamic_frame.from_options(
+            #         connection_type="s3",
+            #         connection_options={
+            #             "paths": [raw_path],
+            #             "recurse": True,
+            #         },
+            #         format=format,
+            #         transformation_ctx="dyf",
+            #     )
+            #     .toDF()
+            #     .write.format("delta")
+            #     .mode("overwrite")
+            #     .option("mergeSchema", "true")
+            #     .save(table_path)
+            # )
             _ = (
                 self.spark.read.format(format)
                 .load(raw_path)
                 .write.format("delta")
+                .mode("overwrite")
+                .option("overwriteSchema", "true")
                 .save(table_path)
             )
 
         self.table = DeltaTable.forPath(self.spark, table_path)
-        self.table.generate("symlink_format_manifest")
+        # self.table.generate("symlink_format_manifest")
 
     def load_cdc(self):
         """Load CDC data from path"""
 
-        cdc_path = os.path.join(self.rz_path, self.table_name, "updates")
+        cdc_path = os.path.join(self.rz_path, self.table_schema, self.table_name, "20*")
         df = self._glue_context.create_dynamic_frame.from_options(
             connection_type="s3",
             connection_options={
                 "paths": [cdc_path],
                 "recurse": True,
             },
-        )
+            format="parquet",
+            transformation_ctx="dyf",
+        ).toDF()
 
         if df.count() == 0:
             print("No CDC data found. Skipping...")
             return
 
-        if "operation" not in df.columns and len(df.columns) != 2:
+        if self.op_col not in df.columns and len(df.columns) < 2:
             raise ValueError("CDC data must have an operation column")
 
-        upserts_df = df.filter("operation <> 'delete'")
-        deletes_df = df.filter("operation = 'delete'")
+        upserts_df = df.filter(f"{self.op_col} <> 'D'").drop(self.op_col)
+        deletes_df = df.filter(f"{self.op_col} = 'D'").drop(self.op_col)
 
-        # parse the data column into a df
-        upserts_df = upserts_df.selectExpr("data.*")
-        deletes_df = deletes_df.selectExpr("data.*")
+        # upserts_df = upserts_df.drop(self.op_col)
+        # deletes_df = deletes_df.drop(self.op_col)
 
         if upserts_df.count() > 0:
             self.table.alias("t").merge(
-                upserts_df.toDF().alias("u"),
+                upserts_df.alias("u"),
                 f"t.{self.merge_key} = u.{self.merge_key}",
             ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
 
         if deletes_df.count() > 0:
             self.table.alias("t").merge(
-                deletes_df.toDF().alias("d"),
+                deletes_df.alias("d"),
                 f"t.{self.merge_key} = d.{self.merge_key}",
             ).whenMatchedDelete().execute()
 
