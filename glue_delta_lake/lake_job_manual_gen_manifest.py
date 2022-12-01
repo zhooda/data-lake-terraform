@@ -134,9 +134,9 @@ class LakeJob:
                 .option("overwriteSchema", "true")
                 .save(table_path)
             )
+            self.table.generate("symlink_format_manifest")
 
         self.table = DeltaTable.forPath(self.spark, table_path)
-        # self.table.generate("symlink_format_manifest")
 
     def load_cdc(self):
         """Load CDC data from path"""
@@ -162,9 +162,6 @@ class LakeJob:
         upserts_df = df.filter(f"{self.op_col} <> 'D'").drop(self.op_col)
         deletes_df = df.filter(f"{self.op_col} = 'D'").drop(self.op_col)
 
-        # upserts_df = upserts_df.drop(self.op_col)
-        # deletes_df = deletes_df.drop(self.op_col)
-
         if upserts_df.count() > 0:
             self.table.alias("t").merge(
                 upserts_df.alias("u"),
@@ -176,6 +173,15 @@ class LakeJob:
                 deletes_df.alias("d"),
                 f"t.{self.merge_key} = d.{self.merge_key}",
             ).whenMatchedDelete().execute()
+
+        if df.schema != self.table.toDF().schema:
+            # send notification to SNS topic
+            
+
+
+
+        # self.table.generate("symlink_format_manifest")
+
 
 
 if __name__ == "__main__":

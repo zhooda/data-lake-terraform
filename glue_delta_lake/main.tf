@@ -16,7 +16,8 @@ terraform {
 }
 
 provider "aws" {
-  region = "ca-central-1"
+  region  = "ca-central-1"
+  profile = "sandbox"
 }
 
 locals {
@@ -104,6 +105,7 @@ resource "aws_db_instance" "mssql" {
   publicly_accessible    = true
   db_subnet_group_name   = module.vpc.database_subnet_group_name
   vpc_security_group_ids = [module.vpc.default_security_group_id]
+  storage_encrypted      = true
 
   tags = {
     Name        = "${local.name}-mssql"
@@ -144,7 +146,7 @@ resource "aws_glue_job" "glue_cdc_job" {
   name              = "${local.name}-glue-cdc-job"
   role_arn          = aws_iam_role.glue_role.arn
   glue_version      = "3.0"
-  number_of_workers = 10
+  number_of_workers = 2
   worker_type       = "G.1X"
 
   command {
@@ -255,7 +257,9 @@ module "database_migration_service" {
   # Subnet group
   repl_subnet_group_name        = "${local.name}-dms-subnet-group"
   repl_subnet_group_description = "DMS Subnet group"
-  repl_subnet_group_subnet_ids  = module.vpc.public_subnets
+
+  // NOTE: Which subnets?
+  repl_subnet_group_subnet_ids = module.vpc.public_subnets
 
   # Instance
   repl_instance_allocated_storage            = 50
@@ -305,7 +309,7 @@ module "database_migration_service" {
         bucket_name             = aws_s3_bucket.dms_bucket.bucket
         bucket_folder           = "dms"
         cdc_path                = "cdc"
-        data_format             = "parquet"
+        data_format             = "csv"
         compression_type        = "NONE"
         timestamp_column_name   = "last_updated"
       }
@@ -346,9 +350,7 @@ module "database_migration_service" {
 
 module "redshift_cluster" {
   source = "cloudposse/redshift-cluster/aws"
-  # Cloud Posse recommends pinning every module to a specific version
-  # version = "x.x.x"
-  name = "${local.name}-redshift-cluster"
+  name   = "${local.name}-redshift-cluster"
 
   subnet_ids             = module.vpc.public_subnets
   vpc_security_group_ids = [module.vpc.default_security_group_id]
@@ -360,8 +362,6 @@ module "redshift_cluster" {
   cluster_type          = "single-node"
   publicly_accessible   = true
   allow_version_upgrade = true
-
-  # context = module.this.context
 }
 
 output "db_endpoint" {

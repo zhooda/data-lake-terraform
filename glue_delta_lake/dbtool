@@ -36,6 +36,9 @@ base_command="docker run --rm mcr.microsoft.com/mssql-tools /opt/mssql-tools/bin
 base_no_db="docker run --rm mcr.microsoft.com/mssql-tools /opt/mssql-tools/bin/sqlcmd -S $endpoint -U admin -P ma1nus3r -Q"
 
 case $1 in
+    "sql")
+        $base_command "$2"
+    ;;
     "init")
         echo "Initializing database"
         run_command="$base_no_db '$init_command_root'"
